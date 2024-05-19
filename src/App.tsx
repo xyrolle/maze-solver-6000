@@ -19,6 +19,102 @@ enum AddingMode {
   WALL = "WALL",
 }
 
+interface SearchStrategy {
+  initialize(start: TPosition, goal: TPosition): void;
+  getNextNode(queue: Array<TPosition>, goal: TPosition): TPosition | null;
+  processNeighbour(
+    currentPos: TPosition,
+    neighbour: TPosition,
+    parentMap: Map<number, TPosition>,
+  ): boolean;
+}
+
+const bfsStrategy: SearchStrategy = {
+  initialize() {},
+  getNextNode(queue) {
+    return queue.shift() || null;
+  },
+  processNeighbour() {
+    return true;
+  },
+};
+
+const dfsStrategy: SearchStrategy = {
+  initialize() {},
+  getNextNode(queue) {
+    return queue.pop() || null;
+  },
+  processNeighbour() {
+    return true;
+  },
+};
+
+const aStarStrategy: SearchStrategy = {
+  gScore: new Map<string, number>(),
+  parentMap: new Map<string, TPosition>(),
+
+  initialize(start) {
+    this.gScore.clear();
+    this.parentMap.clear();
+    this.gScore.set(generateKey(start[0], start[1]), 0);
+  },
+
+  getNextNode(queue, goal) {
+    let minF = Infinity;
+    let minIndex = -1;
+
+    for (let i = 0; i < queue.length; i++) {
+      const [row, column] = queue[i];
+      const g = this.gScore.get(generateKey(row, column)) || 0;
+      const h = manhattanDistance([row, column], goal);
+      const f = g + h;
+
+      if (f < minF) {
+        minF = f;
+        minIndex = i;
+      }
+    }
+
+    if (minIndex > -1) {
+      return queue.splice(minIndex, 1)[0];
+    }
+    return null;
+  },
+
+  processNeighbour(currentPos, neighbour) {
+    const currentKey = generateKey(currentPos[0], currentPos[1]);
+    const neighbourKey = generateKey(neighbour[0], neighbour[1]);
+    const tentativeGScore = (this.gScore.get(currentKey) || 0) + 1;
+
+    if (
+      !this.gScore.has(neighbourKey) ||
+      tentativeGScore < this.gScore.get(neighbourKey)!
+    ) {
+      this.gScore.set(neighbourKey, tentativeGScore);
+      this.parentMap.set(neighbourKey, currentPos);
+      return true;
+    }
+    return false;
+  },
+
+  getOptimalPath() {
+    const path: TPosition[] = [];
+    let currentKey = Array.from(this.parentMap.keys()).pop();
+    while (currentKey) {
+      const currentPos = this.parentMap.get(currentKey);
+      if (currentPos) {
+        path.push(currentPos);
+        currentKey = generateKey(currentPos[0], currentPos[1]);
+      } else {
+        break;
+      }
+    }
+    return path;
+  },
+};
+
+const GRID_WIDTH = 1200;
+
 export type TPosition = [number, number];
 
 export type TGrid = Map<string, ICell>;
@@ -27,12 +123,6 @@ function generateKey(row: number, column: number): string {
   return `${row}-${column}`;
 }
 
-function parseKey(key: string): [number, number] {
-  const [row, column] = key.split("-").map(Number);
-  return [row, column];
-}
-
-// Utility Functions
 export const initialGrid = (rows: number, columns: number): TGrid => {
   const grid = new Map<string, ICell>();
   for (let r = 0; r < rows; r++) {
@@ -41,15 +131,6 @@ export const initialGrid = (rows: number, columns: number): TGrid => {
     }
   }
   return grid;
-};
-
-export const findElement = (grid: TGrid, elementType: "isStart" | "isGoal") => {
-  for (const [key, cell] of grid) {
-    if (cell.state[elementType]) {
-      return parseKey(key);
-    }
-  }
-  return null;
 };
 
 export const getNeighbours = (
@@ -80,7 +161,6 @@ export function getClass(...classes: (string | false)[]): string {
   return classes.filter(Boolean).join(" ");
 }
 
-// Cell Component and CellFactory
 export interface ICell {
   id: number;
   state: {
@@ -96,6 +176,8 @@ export interface ICell {
 }
 
 const shouldNotPutWall = (cell: ICell) => {
+  if (!cell) return true;
+
   return cell.state.isWall || cell.state.isGoal || cell.state.isStart;
 };
 
@@ -147,9 +229,9 @@ interface CellProps {
   row: number;
   column: number;
   data: ICell;
-  rows: number;
+  rows: () => number;
   grid: () => TGrid;
-  columns: number;
+  columns: () => number;
 }
 
 export function Cell(props: CellProps) {
@@ -174,7 +256,7 @@ export function Cell(props: CellProps) {
   );
 
   const borderStyles = state.isWall
-    ? getBorderStyles(row, column, rows, columns, grid())
+    ? getBorderStyles(row, column, rows(), columns(), grid())
     : {};
 
   return (
@@ -183,8 +265,8 @@ export function Cell(props: CellProps) {
       data-column={column}
       class={className}
       style={{
-        width: `${900 / columns}px`,
-        "font-size": `${256 / rows}px`,
+        width: `${GRID_WIDTH / columns()}px`,
+        "font-size": `${256 / columns()}px`,
         ...borderStyles,
       }}
     >
@@ -364,6 +446,7 @@ interface GridProps {
   isAdding: () => boolean;
   canStep: () => boolean;
   addingMode: () => AddingMode;
+  setAddingMode: (addingMode: AddingMode) => void;
   searching: () => boolean;
   searchStarted: () => boolean;
   setGrid: (grid: TGrid) => void;
@@ -381,6 +464,7 @@ export function Grid(props: GridProps) {
     isAdding,
     canStep,
     addingMode,
+    setAddingMode,
     searching,
     searchStarted,
     setGrid,
@@ -431,7 +515,7 @@ export function Grid(props: GridProps) {
       return;
     }
 
-    if (clickedCell.state.isVisited) {
+    if (clickedCell.state.isVisited || clickedCell.state.isQueued) {
       return;
     }
 
@@ -448,8 +532,10 @@ export function Grid(props: GridProps) {
 
       if (newCell.state.isStart) {
         setStart([row, column]);
+        setAddingMode(AddingMode.GOAL);
       } else if (newCell.state.isGoal) {
         setGoal([row, column]);
+        setAddingMode(AddingMode.WALL);
       }
 
       newGrid.set(generateKey(row, column), { ...newCell, id: cell.id });
@@ -477,8 +563,8 @@ export function Grid(props: GridProps) {
             <Cell
               row={r}
               column={c}
-              rows={rows()}
-              columns={columns()}
+              rows={rows}
+              columns={columns}
               grid={grid}
               data={cell}
             />,
@@ -569,8 +655,11 @@ export default function App() {
       return newGrid;
     });
   };
-
-  function* search(start: TPosition) {
+  function* search(
+    start: TPosition,
+    goal: TPosition,
+    strategy: SearchStrategy,
+  ) {
     const visited = new Set<number>();
     const parentMap = new Map<number, TPosition>();
 
@@ -579,6 +668,7 @@ export default function App() {
     const queue = Array.from(neighbours);
 
     visited.add(startEl.id);
+    strategy.initialize(start, goal);
 
     neighbours.forEach((neighbour) => {
       const [nRow, nCol] = neighbour;
@@ -586,15 +676,15 @@ export default function App() {
       parentMap.set(neighbourCell.id, start);
     });
 
-    const newGrid = new Map<string, ICell>(grid());
-
     while (queue.length > 0) {
-      const current: any | Array<TPosition> =
-        strategy() === STRATEGIES.BFS ? queue.shift() : queue.pop();
+      const newGrid = new Map<string, ICell>(grid());
+      const current = strategy.getNextNode(queue, goal);
+      if (!current) break;
 
       const [row, column] = current;
+      const currentKey = generateKey(row, column);
 
-      const cell = newGrid.get(generateKey(row, column))!;
+      const cell = newGrid.get(currentKey)!;
 
       if (cell.state.isWall || cell.state.isStart) continue;
       if (visited.has(cell.id)) continue;
@@ -630,10 +720,34 @@ export default function App() {
         return;
       }
 
-      newGrid.set(generateKey(row, column), {
-        ...CellFactory.visited(),
-        id: cell.id,
-      });
+      if (strategy === aStarStrategy) {
+        newGrid.forEach((cell, key) => {
+          if (cell.state.isPath) {
+            cell.state.isPath = false;
+          }
+        });
+
+        const optimalPath = strategy.getOptimalPath();
+        optimalPath.forEach(([r, c]) => {
+          const key = generateKey(r, c);
+          if (
+            !newGrid.get(key)!.state.isGoal &&
+            !newGrid.get(key)!.state.isStart
+          ) {
+            newGrid.set(key, {
+              ...CellFactory.path(),
+              id: newGrid.get(key)!.id,
+            });
+          }
+        });
+      }
+
+      if (strategy !== aStarStrategy) {
+        newGrid.set(currentKey, {
+          ...CellFactory.visited(),
+          id: cell.id,
+        });
+      }
 
       const currentPos = [row, column];
       const nextNeighbours = getNeighbours(currentPos, grid());
@@ -641,25 +755,32 @@ export default function App() {
       nextNeighbours.forEach((neighbour) => {
         const [nRow, nCol] = neighbour;
         const nCell = newGrid.get(generateKey(nRow, nCol))!;
-        if (!visited.has(nCell.id) && !nCell.state.isWall) {
+        if (
+          !visited.has(nCell.id) &&
+          !nCell.state.isWall &&
+          strategy.processNeighbour(currentPos, neighbour, parentMap)
+        ) {
           queue.push(neighbour);
           parentMap.set(nCell.id, currentPos);
         }
       });
 
-      queue.forEach(([r, c]) => {
-        const key = generateKey(r, c);
-        if (
-          !newGrid.get(key)!.state.isGoal &&
-          !newGrid.get(key)!.state.isStart &&
-          !newGrid.get(key)!.state.isVisited
-        ) {
-          newGrid.set(key, {
-            ...CellFactory.queued(),
-            id: newGrid.get(key)!.id,
-          });
-        }
-      });
+      if (strategy !== aStarStrategy) {
+        queue.forEach(([r, c]) => {
+          const key = generateKey(r, c);
+          if (
+            !newGrid.get(key)!.state.isGoal &&
+            !newGrid.get(key)!.state.isStart &&
+            !newGrid.get(key)!.state.isVisited &&
+            !newGrid.get(key)!.state.isWall
+          ) {
+            newGrid.set(key, {
+              ...CellFactory.queued(),
+              id: newGrid.get(key)!.id,
+            });
+          }
+        });
+      }
 
       setGrid(new Map(newGrid));
       yield false;
@@ -668,9 +789,22 @@ export default function App() {
     yield true;
   }
 
+  const getSearchStrategy = () => {
+    switch (strategy()) {
+      case STRATEGIES.BFS:
+        return bfsStrategy;
+      case STRATEGIES.DFS:
+        return dfsStrategy;
+      case STRATEGIES.AStar:
+        return aStarStrategy;
+      default:
+        throw new Error("Unknown strategy");
+    }
+  };
+
   const searchWrapper = () => {
     if (!searchGeneratorRef) {
-      searchGeneratorRef = search(start()!);
+      searchGeneratorRef = search(start()!, goal()!, getSearchStrategy());
     }
 
     const { done } = searchGeneratorRef.next();
@@ -703,6 +837,7 @@ export default function App() {
     setCanStep(true);
     setIsSearching(false);
     setSearchStarted(false);
+    setAddingMode(AddingMode.START);
     searchGeneratorRef = null;
     setGrid(initialGrid(rows(), columns()));
   };
@@ -734,6 +869,7 @@ export default function App() {
         isAdding={isAdding}
         canStep={canStep}
         addingMode={addingMode}
+        setAddingMode={setAddingMode}
         searching={isSearching}
         searchStarted={searchStarted}
         setGrid={setGrid}
